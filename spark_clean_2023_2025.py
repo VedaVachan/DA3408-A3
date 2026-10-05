@@ -1,22 +1,14 @@
 import argparse
-import glob
 import json
 import time
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, to_timestamp, udf, when
 from pyspark.sql.types import DoubleType
 
-
 def average_speed(distance, duration_hours):
-    """Average speed in miles/hour."""
     if distance is None or duration_hours is None or duration_hours <= 0:
         return None
     return float(distance / duration_hours)
-
-
-average_speed_udf = udf(average_speed, DoubleType())
-
 
 def build_spark():
     return (
@@ -28,168 +20,85 @@ def build_spark():
         .getOrCreate()
     )
 
-
-def build_pipeline(spark, input_path, zones_path, mode):
-    input_files = sorted(glob.glob(input_path))
-    if not input_files:
-        raise FileNotFoundError(f"No input files matched: {input_path}")
-    trips = spark.read.parquet(*input_files)
-
-    trips = trips.select(
-        "VendorID",
-        "tpep_pickup_datetime",
-        "tpep_dropoff_datetime",
-        "trip_distance",
-        "PULocationID",
-        "DOLocationID",
-        "fare_amount"
-    )
-
-    trips = trips.dropna(
-        subset=[
-            "tpep_pickup_datetime",
-            "tpep_dropoff_datetime",
-            "trip_distance",
-            "PULocationID",
-            "DOLocationID"
-        ]
-    )
-
-    trips = trips.dropDuplicates()
-
+def run_pipeline(spark, input_path, zones_path, output_path, mode):
     trips = (
-        trips
-        .withColumn(
-            "tpep_pickup_datetime",
-            to_timestamp("tpep_pickup_datetime")
-        )
-        .withColumn(
-            "tpep_dropoff_datetime",
-            to_timestamp("tpep_dropoff_datetime")
-        )
-        .withColumn(
-            "trip_distance",
-            col("trip_distance").cast("double")
-        )
-    )
-
-    zones = (
-        spark.read
-        .option("header", True)
-        .csv(zones_path)
+        spark.read.parquet(input_path)
         .select(
-            col("LocationID").cast("long").alias("LocationID"),
-            "Borough",
-            "Zone",
-            "service_zone"
+            "VendorID", "tpep_pickup_datetime", "tpep_dropoff_datetime",
+            "trip_distance", "PULocationID", "DOLocationID", "fare_amount"
         )
+        .dropna()
+        .dropDuplicates()
+        .withColumn("tpep_pickup_datetime", to_timestamp("tpep_pickup_datetime"))
+        .withColumn("tpep_dropoff_datetime", to_timestamp("tpep_dropoff_datetime"))
+        .withColumn("trip_distance", col("trip_distance").cast("double"))
     )
 
-    pickup_zones = zones.select(
+    zones = spark.read.option("header", True).csv(zones_path)
+
+    pickup = zones.select(
         col("LocationID").alias("PULocationID"),
-        col("Borough").alias("pickup_borough"),
-        col("Zone").alias("pickup_zone"),
-        col("service_zone").alias("pickup_service_zone")
+        col("Borough").alias("PU_Borough"),
+        col("Zone").alias("PU_Zone"),
+        col("service_zone").alias("PU_service_zone")
     )
-
-    dropoff_zones = zones.select(
+    dropoff = zones.select(
         col("LocationID").alias("DOLocationID"),
-        col("Borough").alias("dropoff_borough"),
-        col("Zone").alias("dropoff_zone"),
-        col("service_zone").alias("dropoff_service_zone")
+        col("Borough").alias("DO_Borough"),
+        col("Zone").alias("DO_Zone"),
+        col("service_zone").alias("DO_service_zone")
     )
 
-    trips = trips.join(
-        pickup_zones,
-        on="PULocationID",
-        how="inner"
-    )
+    result = trips.join(pickup, "PULocationID", "inner")
+    result = result.join(dropoff, "DOLocationID", "inner")
 
-    trips = trips.join(
-        dropoff_zones,
-        on="DOLocationID",
-        how="inner"
-    )
-
-    trips = trips.withColumn(
+    result = result.withColumn(
         "trip_duration_hours",
-        (
-            col("tpep_dropoff_datetime").cast("long")
-            - col("tpep_pickup_datetime").cast("long")
-        ) / 3600.0
+        (col("tpep_dropoff_datetime").cast("long") -
+         col("tpep_pickup_datetime").cast("long")) / 3600.0
     )
 
     if mode == "udf":
-        trips = trips.withColumn(
-            "average_speed_mph",
-            average_speed_udf(
-                col("trip_distance"),
-                col("trip_duration_hours")
-            )
+        speed_udf = udf(average_speed, DoubleType())
+        result = result.withColumn(
+            "average_speed",
+            speed_udf(col("trip_distance"), col("trip_duration_hours"))
         )
-
-    elif mode == "native":
-        trips = trips.withColumn(
-            "average_speed_mph",
+    else:
+        result = result.withColumn(
+            "average_speed",
             when(
                 col("trip_duration_hours") > 0,
                 col("trip_distance") / col("trip_duration_hours")
-            ).otherwise(None)
+            )
         )
 
-    else:
-        raise ValueError("mode must be 'udf' or 'native'")
-
-    return trips
-
+    result.write.mode("overwrite").parquet(output_path)
 
 def main():
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--input", required=True)
     parser.add_argument("--zones", required=True)
     parser.add_argument("--output", required=True)
-
-    parser.add_argument(
-        "--mode",
-        choices=["udf", "native"],
-        default="udf"
-    )
-
+    parser.add_argument("--mode", choices=["native", "udf"], required=True)
     args = parser.parse_args()
 
-    spark = build_spark()
-    spark.sparkContext.setLogLevel("WARN")
-
     start = time.perf_counter()
+    spark = build_spark()
+    try:
+        run_pipeline(spark, args.input, args.zones, args.output, args.mode)
+    finally:
+        spark.stop()
 
-    trips = build_pipeline(
-        spark,
-        args.input,
-        args.zones,
-        args.mode
-    )
-
-    trips.write.mode("overwrite").parquet(args.output)
-
-    total_time = time.perf_counter() - start
-
-    result = {
+    elapsed = time.perf_counter() - start
+    print("SPARK BENCHMARK COMPLETED")
+    print(json.dumps({
         "framework": "spark",
         "mode": args.mode,
-        "total_time_seconds": round(total_time, 3),
+        "total_time_seconds": elapsed,
         "input": args.input,
         "output": args.output
-    }
-
-    print("\n==========================================")
-    print("SPARK BENCHMARK COMPLETED")
-    print("==========================================")
-    print(json.dumps(result))
-    print("==========================================\n")
-
-    spark.stop()
-
+    }))
 
 if __name__ == "__main__":
     main()
