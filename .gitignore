@@ -1,0 +1,9 @@
+venv/
+spark-4.2.0-bin-hadoop3/
+*.tgz
+data/raw/
+data/nyc_taxi_all.parquet
+output/
+logs/
+__pycache__/
+*.pyc
