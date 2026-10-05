@@ -1,0 +1,14 @@
+## AI Disclosure
+
+I used AI mainly to:
+
+- Understand the assignment requirements.
+- Help with Spark and Ray code.
+- Debug errors during setup and execution.
+- Organize the README and report.
+
+I manually set up the clusters, configured the network, ran the benchmarks, collected screenshots, and checked the results.
+
+The benchmark results were taken from my actual runs. I did not use AI to create or estimate performance values.
+
+I reviewed and verified the final code, results, and submission myself.
