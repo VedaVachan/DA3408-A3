@@ -1,0 +1,21 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Spark
+spark-4.2.0-bin-hadoop3/
+*.tgz
+
+# Data
+data/*.parquet
+data/raw/
+data/nyc_taxi_all.parquet
+
+# Generated outputs
+output/
+logs/
+
+# OS
+.DS_Store
